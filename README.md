@@ -8,6 +8,8 @@
 
 `received_at` 是 Worker 实际收到邮件时生成的 UTC ISO 8601 时间。每次入库后，插入和全局清理在同一个 D1 `batch()` 事务中顺序执行，按 `received_at DESC, id DESC` 保留最新 50 行。并发投递不会在单次插入和清理之间穿插。
 
+去重键是 `(message_id, recipient)`，不是全局 `message_id`：同一封信发给不同地址可以各存一份；Cloudflare 对同一地址重投时使用 `INSERT OR IGNORE`，不会因唯一约束失败。
+
 ## 部署
 
 要求：Cloudflare 账户、已托管到 Cloudflare 的域名、Node.js 20+。

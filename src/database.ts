@@ -7,8 +7,9 @@ export async function insertAndTrim(
   db: D1Database,
   message: MessageRecord,
 ): Promise<void> {
+  // OR IGNORE：同 message_id + recipient 重投时不报错（配合联合唯一索引）
   const insert = db.prepare(`
-    INSERT INTO messages (
+    INSERT OR IGNORE INTO messages (
       id, message_id, sender, recipient, subject,
       text_content, html_content, raw_size, received_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

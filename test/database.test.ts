@@ -30,10 +30,46 @@ describe("insertAndTrim", () => {
     await insertAndTrim(db, message);
     expect(batch).toHaveBeenCalledOnce();
     expect(batch.mock.calls[0]?.[0]).toEqual(statements);
+    expect(statements[0]?.sql).toMatch(/INSERT\s+OR\s+IGNORE/i);
     expect(statements[0]?.values).toEqual(Object.values(message));
     expect(statements[1]?.sql).toContain("ORDER BY received_at DESC, id DESC");
     expect(statements[1]?.values).toEqual([50]);
     expect(statements[1]?.sql).not.toContain("recipient =");
+  });
+
+  it("keeps insert+trim batch order so retries stay idempotent at the SQL layer", async () => {
+    const statements: FakeStatement[] = [];
+    const batch = vi.fn(async (_statements: D1PreparedStatement[]) => []);
+    const db = {
+      prepare(sql: string) {
+        const statement = new FakeStatement(sql);
+        statements.push(statement);
+        return statement;
+      },
+      batch,
+    } as unknown as D1Database;
+
+    const message: MessageRecord = {
+      id: "id-retry",
+      message_id: "<same@example.net>",
+      sender: "noreply@example.net",
+      recipient: "box@example.com",
+      subject: "code",
+      text_content: "123456",
+      html_content: "",
+      raw_size: 50,
+      received_at: "2026-07-13T01:00:00.000Z",
+    };
+
+    await insertAndTrim(db, message);
+    await insertAndTrim(db, { ...message, id: "id-retry-2" });
+
+    expect(batch).toHaveBeenCalledTimes(2);
+    for (const call of batch.mock.calls) {
+      const [batchStatements] = call;
+      expect(batchStatements).toHaveLength(2);
+    }
+    expect(statements.filter((s) => /INSERT\s+OR\s+IGNORE/i.test(s.sql))).toHaveLength(2);
   });
 });
 
