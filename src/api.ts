@@ -5,6 +5,7 @@ import {
   latestMessage,
   listMessages,
 } from "./database";
+import { normalizeToChinaISO } from "./time";
 import type { ApiError, ApiSuccess, Env, MessageFilters } from "./types";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -18,7 +19,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       return ok({ status: "ok" });
     }
     if (method === "POST" && url.pathname === "/api/address") {
-      return createAddress(request, env);
+      return await createAddress(request, env);
     }
     if (method === "GET" && url.pathname === "/api/messages/latest") {
       const filters = parseFilters(url);
@@ -63,8 +64,20 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 async function createAddress(request: Request, env: Env): Promise<Response> {
   let requestedPrefix: string | undefined;
   if ((request.headers.get("content-type") ?? "").includes("application/json")) {
-    const body = await request.json<{ prefix?: unknown }>();
-    if (typeof body.prefix === "string") requestedPrefix = body.prefix;
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      throw new RequestError("request body must be valid JSON");
+    }
+    if (
+      body !== null &&
+      typeof body === "object" &&
+      !Array.isArray(body) &&
+      typeof (body as { prefix?: unknown }).prefix === "string"
+    ) {
+      requestedPrefix = (body as { prefix: string }).prefix;
+    }
   }
 
   const prefix = requestedPrefix?.trim().toLowerCase() || randomPrefix();
@@ -78,9 +91,14 @@ async function createAddress(request: Request, env: Env): Promise<Response> {
 
 function parseFilters(url: URL): MessageFilters {
   const address = requireAddress(url.searchParams.get("address"));
-  const after = optional(url.searchParams.get("after"));
-  if (after && Number.isNaN(Date.parse(after))) {
-    throw new RequestError("after must be a valid ISO 8601 timestamp");
+  const afterRaw = optional(url.searchParams.get("after"));
+  let after: string | undefined;
+  if (afterRaw) {
+    const normalized = normalizeToChinaISO(afterRaw);
+    if (!normalized) {
+      throw new RequestError("after must be a valid ISO 8601 timestamp");
+    }
+    after = normalized;
   }
   return {
     address,

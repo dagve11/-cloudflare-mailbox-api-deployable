@@ -26,6 +26,29 @@ describe("HTTP API", () => {
     const response = await handleRequest(new Request("https://worker.test/api/messages/latest"), env());
     expect(response.status).toBe(400);
   });
+
+  it("rejects invalid JSON body on address create with 400", async () => {
+    const response = await handleRequest(new Request("https://worker.test/api/address", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not-json",
+    }), env());
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      success: false,
+      error: { code: "bad_request", message: "request body must be valid JSON" },
+    });
+  });
+
+  it("rejects invalid after timestamps with 400", async () => {
+    const response = await handleRequest(
+      new Request("https://worker.test/api/messages/latest?address=a@example.com&after=not-a-date"),
+      env(),
+    );
+    expect(response.status).toBe(400);
+    const body = await response.json() as { error: { message: string } };
+    expect(body.error.message).toContain("after");
+  });
 });
 
 function env(): Env {

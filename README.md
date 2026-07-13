@@ -6,7 +6,7 @@
 
 每封邮件只保存以下字段：`id`、`message_id`、`sender`、`recipient`、`subject`、`text_content`、`html_content`、`raw_size`、`received_at`。
 
-`received_at` 是 Worker 实际收到邮件时生成的 UTC ISO 8601 时间。每次入库后，插入和全局清理在同一个 D1 `batch()` 事务中顺序执行，按 `received_at DESC, id DESC` 保留最新 50 行。并发投递不会在单次插入和清理之间穿插。
+`received_at` 是 Worker 实际收到邮件时生成的**东八区** ISO 8601 时间，格式固定为 `YYYY-MM-DDTHH:mm:ss.sss+08:00`（例如 `2026-07-13T20:00:00.000+08:00`）。查询参数 `after` 会先解析再规范成同一格式后再比较。每次入库后，插入和全局清理在同一个 D1 `batch()` 事务中顺序执行，按 `received_at DESC, id DESC` 保留最新 50 行。并发投递不会在单次插入和清理之间穿插。
 
 去重键是 `(message_id, recipient)`，不是全局 `message_id`：同一封信发给不同地址可以各存一份；Cloudflare 对同一地址重投时使用 `INSERT OR IGNORE`，不会因唯一约束失败。
 
@@ -82,7 +82,7 @@ curl -G https://YOUR_WORKER/api/messages \
 ```bash
 curl -G https://YOUR_WORKER/api/messages/latest \
   --data-urlencode 'address=1111@example.com' \
-  --data-urlencode 'after=2026-07-12T12:00:00Z' \
+  --data-urlencode 'after=2026-07-12T20:00:00.000+08:00' \
   --data-urlencode 'sender=no-reply@example.net' \
   --data-urlencode 'subject=Welcome'
 ```
@@ -102,7 +102,7 @@ curl -G https://YOUR_WORKER/api/messages/latest \
       "text_content": "Hello",
       "html_content": "<p>Hello</p>",
       "raw_size": 1234,
-      "received_at": "2026-07-12T12:30:00.000Z"
+      "received_at": "2026-07-12T20:30:00.000+08:00"
     }
   }
 }

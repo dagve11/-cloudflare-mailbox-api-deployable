@@ -1,11 +1,12 @@
 import PostalMime from "postal-mime";
 import { insertAndTrim } from "./database";
+import { toChinaISOString } from "./time";
 import type { Env, MessageRecord } from "./types";
 
 export async function receiveEmail(message: ForwardableEmailMessage, env: Env): Promise<void> {
   const raw = await new Response(message.raw).arrayBuffer();
   const parsed = await PostalMime.parse(raw);
-  const now = new Date().toISOString();
+  const now = toChinaISOString();
 
   const record: MessageRecord = {
     id: crypto.randomUUID(),
