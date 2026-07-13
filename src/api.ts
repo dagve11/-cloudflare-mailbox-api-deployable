@@ -5,6 +5,7 @@ import {
   latestMessage,
   listMessages,
 } from "./database";
+import { nginxNotFound, nginxWelcome } from "./nginx";
 import { normalizeToChinaISO } from "./time";
 import type { ApiError, ApiSuccess, Env, MessageFilters } from "./types";
 
@@ -13,9 +14,14 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const method = request.method.toUpperCase();
+  const path = url.pathname === "" ? "/" : url.pathname;
 
   try {
-    if (method === "GET" && url.pathname === "/health") {
+    // 域名根路径伪装成 nginx 默认欢迎页
+    if (method === "GET" && (path === "/" || path === "/index.html")) {
+      return nginxWelcome();
+    }
+    if (method === "GET" && path === "/health") {
       return ok({ status: "ok" });
     }
     if (method === "POST" && url.pathname === "/api/address") {
@@ -51,6 +57,10 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       }
     }
 
+    // 非 API 路径统一返回 nginx 风格页面，避免暴露接口形态
+    if (!path.startsWith("/api/") && path !== "/api") {
+      return nginxNotFound();
+    }
     return fail(404, "not_found", "Route not found");
   } catch (error) {
     if (error instanceof RequestError) {

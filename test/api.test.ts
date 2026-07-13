@@ -9,6 +9,23 @@ describe("HTTP API", () => {
     expect(await response.json()).toEqual({ success: true, data: { status: "ok" } });
   });
 
+  it("serves nginx welcome page on root", async () => {
+    const response = await handleRequest(new Request("https://mailbox-api.natv.cc.cd/"), env());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(response.headers.get("server")).toBe("nginx");
+    const html = await response.text();
+    expect(html).toContain("Welcome to nginx!");
+    expect(html).toContain("Thank you for using nginx.");
+  });
+
+  it("serves nginx 404 for unknown non-api paths", async () => {
+    const response = await handleRequest(new Request("https://mailbox-api.natv.cc.cd/robots.txt"), env());
+    expect(response.status).toBe(404);
+    expect(response.headers.get("server")).toBe("nginx");
+    expect(await response.text()).toContain("404 Not Found");
+  });
+
   it("creates a requested catch-all address", async () => {
     const response = await handleRequest(new Request("https://worker.test/api/address", {
       method: "POST",

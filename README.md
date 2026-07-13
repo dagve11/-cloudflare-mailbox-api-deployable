@@ -1,18 +1,31 @@
 # Cloudflare Catch-all Mailbox API
 
-一个只负责收信和读取正文的轻量邮件 API。Cloudflare Email Routing 的 Catch-all 把邮件交给 Email Worker，Worker 使用 `postal-mime` 解析后写入 D1。系统全局只保留按接收时间排序的最新 50 封邮件，不保存附件，也不使用定时任务。
+基于 Cloudflare Workers + Email Routing + D1 的轻量**临时收信 API**。
 
-## 保存的数据
+- Catch-all 收信：任意前缀 `@你的域名` 都能进 Worker
+- 只存正文（纯文本 / HTML），**不存附件**
+- 全局只保留最新 **50** 封（按接收时间）
+- 无定时任务；重投幂等（`message_id + recipient`）
 
-每封邮件只保存以下字段：`id`、`message_id`、`sender`、`recipient`、`subject`、`text_content`、`html_content`、`raw_size`、`received_at`。
+适合：注册验证码、联调收信、脚本轮询取最新一封。
 
-`received_at` 是 Worker 实际收到邮件时生成的**东八区** ISO 8601 时间，格式固定为 `YYYY-MM-DDTHH:mm:ss.sss+08:00`（例如 `2026-07-13T20:00:00.000+08:00`）。查询参数 `after` 会先解析再规范成同一格式后再比较。每次入库后，插入和全局清理在同一个 D1 `batch()` 事务中顺序执行，按 `received_at DESC, id DESC` 保留最新 50 行。并发投递不会在单次插入和清理之间穿插。
+## 架构
 
-去重键是 `(message_id, recipient)`，不是全局 `message_id`：同一封信发给不同地址可以各存一份；Cloudflare 对同一地址重投时使用 `INSERT OR IGNORE`，不会因唯一约束失败。
+```text
+发信方 → Email Routing (Catch-all)
+              ↓
+        Email Worker (postal-mime 解析)
+              ↓
+             D1 (messages，全局 trim 50)
+              ↑
+     HTTP API（查列表 / 最新 / 删信）
+```
 
-## 部署
+`POST /api/address` **不会**创建真实邮箱账户，只生成/返回一个可用于 Catch-all 的地址字符串。
 
-要求：Cloudflare 账户、已托管到 Cloudflare 的域名、Node.js 20+。
+## 快速部署
+
+**要求：** Cloudflare 账户、域名已接入 Cloudflare、Node.js 20+。
 
 ```bash
 npm install
@@ -21,7 +34,11 @@ npx wrangler d1 create mailbox-db
 cp wrangler.toml.example wrangler.toml
 ```
 
-把创建 D1 后输出的 `database_id` 填入 `wrangler.toml`，并把 `MAIL_DOMAIN` 改成你的收信域名。然后执行：
+编辑 `wrangler.toml`：
+
+1. 填入 D1 的 `database_id`
+2. 将 `MAIL_DOMAIN` 改为你的收信域名（如 `example.com`）
+3. 按需配置 `routes` / 自定义域名
 
 ```bash
 npm run db:migrate:remote
@@ -29,55 +46,100 @@ npm run check
 npm run deploy
 ```
 
-在 Cloudflare 控制台进入 **Email > Email Routing > Routing rules**：
+### 配置 Email Routing
 
-1. 启用 Email Routing 并按提示添加 DNS 记录。
-2. 新建 Catch-all 规则。
-3. 动作选择 **Send to a Worker**，目标选择本项目部署出的 Worker。
-4. 启用规则。
+Cloudflare 控制台 → **Email** → **Email Routing** → **Routing rules**：
 
-Catch-all 生效后，`任意前缀@你的域名` 都能收信。`POST /api/address` 不会创建真实邮箱账户，只会生成或返回一个可用于 Catch-all 的地址。
+1. 启用 Email Routing，按提示加 DNS
+2. 新建 **Catch-all** 规则
+3. 动作：**Send to a Worker** → 选择本项目 Worker
+4. 启用规则
+
+之后 `任意前缀@MAIL_DOMAIN` 即可收信。
+
+> `wrangler.toml` 含数据库 ID 等环境信息，已在 `.gitignore` 中忽略；仓库只保留 `wrangler.toml.example`。
+
+## 数据说明
+
+| 字段 | 说明 |
+|------|------|
+| `id` | 本地 UUID 主键 |
+| `message_id` | 邮件头 Message-ID（缺省时生成） |
+| `sender` / `recipient` | 发件 / 收件，入库小写 |
+| `subject` | 标题 |
+| `text_content` / `html_content` | 正文 |
+| `raw_size` | 原始体积（字节） |
+| `received_at` | 收到时间（**东八区**） |
+
+**时间：** 固定格式 `YYYY-MM-DDTHH:mm:ss.sss+08:00`  
+示例：`2026-07-13T20:00:00.000+08:00`  
+查询参数 `after` 会先解析，再规范成同一格式后比较（可传 `Z` / `+00:00` / `+08:00` 等）。
+
+**去重：** 唯一键为 `(message_id, recipient)`。  
+同一 Message-ID 发给不同地址可各存一份；同一地址重投使用 `INSERT OR IGNORE`，不报错。
+
+**容量：** 每次入库后，在同一 D1 `batch()` 事务内按 `received_at DESC, id DESC` 全局只留 50 行（不是按地址各 50）。
 
 ## API
 
-所有响应均为 JSON。成功格式为 `{"success":true,"data":...}`，失败格式为 `{"success":false,"error":{"code":"...","message":"..."}}`。
+- 基址将下文 `https://YOUR_WORKER` 换成你的 Worker URL 或自定义域名  
+- 响应均为 JSON  
 
-### 健康检查
+| 结果 | 格式 |
+|------|------|
+| 成功 | `{"success":true,"data":...}` |
+| 失败 | `{"success":false,"error":{"code":"...","message":"..."}}` |
 
-```http
-GET /health
-```
+常见错误码：`bad_request`（400）、`not_found`（404）、`internal_error`（500）。
 
-### 获取收信地址
+### 根路径伪装
 
-不传内容时随机生成地址：
+浏览器直接打开域名（`GET /`）会返回仿 **nginx 默认欢迎页**（`Server: nginx`），不暴露 API。  
+未知非 `/api/*` 路径返回仿 nginx 的 404 页。接口仍走下方路径。
+
+### `GET /health`
+
+健康检查（JSON，供探活；不伪装）。
 
 ```bash
+curl https://YOUR_WORKER/health
+```
+
+### `POST /api/address`
+
+生成收信地址。无 body 时随机前缀；可指定 `prefix`（`a-z0-9._-`，最长 63）。
+
+```bash
+# 随机
 curl -X POST https://YOUR_WORKER/api/address
-```
 
-指定前缀：
-
-```bash
+# 指定前缀
 curl -X POST https://YOUR_WORKER/api/address \
   -H 'content-type: application/json' \
   -d '{"prefix":"1111"}'
 ```
 
-### 查询邮件列表
+非法 JSON 返回 **400**。
+
+### `GET /api/messages`
+
+按收件地址列邮件（最多 50）。
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `address` | 是 | 收件地址 |
+| `after` | 否 | 只返回此时间之后的邮件 |
+| `sender` | 否 | 发件地址精确匹配（不区分大小写） |
+| `subject` | 否 | 标题包含匹配；`%` `_` 当普通字符 |
 
 ```bash
 curl -G https://YOUR_WORKER/api/messages \
   --data-urlencode 'address=1111@example.com'
 ```
 
-可选查询参数：
+### `GET /api/messages/latest`
 
-- `after`：只返回此 ISO 8601 时间之后收到的邮件。
-- `sender`：按完整发件地址精确筛选，不区分大小写。
-- `subject`：按标题包含关系筛选，`%` 和 `_` 会作为普通字符处理。
-
-三个筛选参数也适用于最新邮件接口：
+条件同列表接口，只返回**最新一封**；无匹配时 `message` 为 `null`。
 
 ```bash
 curl -G https://YOUR_WORKER/api/messages/latest \
@@ -86,8 +148,6 @@ curl -G https://YOUR_WORKER/api/messages/latest \
   --data-urlencode 'sender=no-reply@example.net' \
   --data-urlencode 'subject=Welcome'
 ```
-
-该接口只返回最新一封匹配邮件：
 
 ```json
 {
@@ -108,30 +168,34 @@ curl -G https://YOUR_WORKER/api/messages/latest \
 }
 ```
 
-没有匹配邮件时 `message` 为 `null`。
+### `GET|DELETE /api/messages/:id`
 
-### 按 ID 获取或删除
+按本地 `id` 获取或删除单封邮件。
 
 ```bash
 curl https://YOUR_WORKER/api/messages/MESSAGE_ID
 curl -X DELETE https://YOUR_WORKER/api/messages/MESSAGE_ID
 ```
 
-### 删除某地址的全部邮件
+### `DELETE /api/messages?address=`
+
+删除某收件地址下全部邮件。
 
 ```bash
 curl -X DELETE -G https://YOUR_WORKER/api/messages \
   --data-urlencode 'address=1111@example.com'
 ```
 
-## Python 轮询最新正文
+## Python 轮询示例
+
+启动时记录当前东八区时间，只等之后到达的新邮件；优先打印纯文本，否则打印 HTML。
 
 ```bash
 python -m pip install -r examples/requirements.txt
 python examples/poll_latest.py https://YOUR_WORKER 1111@example.com
 ```
 
-脚本启动时记录当前时间，只轮询之后到达的新邮件。收到邮件后优先打印纯文本正文；纯文本为空时打印 HTML 正文。
+可选：`--interval`（秒，默认 2）、`--timeout`（秒，默认 120）。
 
 ## 本地开发
 
@@ -140,8 +204,27 @@ npm run db:migrate:local
 npm run dev
 ```
 
-HTTP API 可以在本地测试。真实 Email Routing 投递需要部署到 Cloudflare 后配置 Catch-all。
+| 命令 | 说明 |
+|------|------|
+| `npm run dev` | 本地 Worker |
+| `npm test` | 单元测试 |
+| `npm run typecheck` | 类型检查 |
+| `npm run check` | typecheck + test |
+| `npm run deploy` | 部署到 Cloudflare |
+| `npm run db:migrate:local` / `db:migrate:remote` | 应用 D1 迁移 |
 
-## 安全建议
+HTTP API 可本地测；真实收信需部署并配置 Catch-all。
 
-示例接口没有身份验证，知道 Worker URL 的人可能读取或删除邮件。正式使用时建议在 Worker 前增加 Cloudflare Access，或添加 API Token 校验，并避免在日志中输出邮件正文。
+## 安全说明
+
+当前接口**无鉴权**。知道 URL 的人可以读、删邮件。
+
+正式使用建议：
+
+- 前挂 Cloudflare Access，或自建 API Token 校验  
+- 勿在日志中打印邮件正文  
+- 勿把 `wrangler.toml`、密钥提交进仓库  
+
+## 许可与范围
+
+本仓库为可自部署示例，默认不包含生产级鉴权与多租户隔离。按需自行加固后再对外暴露。
